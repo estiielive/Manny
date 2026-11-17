@@ -4,3 +4,5 @@
 -r vendor/AI-Youtube-Shorts-Generator/requirements-local.txt
 # OpenCV 5 removed CascadeClassifier, which the shorts generator uses for face tracking.
 opencv-python>=4.8,<5
+# PyAV 19 changed av.open(), which faster-whisper 1.2.x calls with a removed argument.
+av<19
