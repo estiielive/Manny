@@ -137,6 +137,55 @@ def download_vod(vod, out_dir, max_minutes=0):
 # --------------------------------------------------------------------------- #
 # AI-Youtube-Shorts-Generator
 # --------------------------------------------------------------------------- #
+_patched = False
+
+
+def _patch_shorts_generator():
+    """Work around two upstream issues in AI-Youtube-Shorts-Generator.
+
+    1. Videos over 30 min are split into chunks, but each chunk's transcript keeps
+       absolute timestamps while highlights are validated against the chunk's own
+       0..duration range and then shifted by the chunk offset. So every chunk after
+       the first loses its highlights (or gets them shifted twice). Stream VODs are
+       always long, so rebase each chunk's segments to start at 0.
+    2. The google-genai SDK defaults to the v1 API, where current Gemini models
+       (e.g. preview ones) aren't served; use v1beta.
+    """
+    global _patched
+    if _patched:
+        return
+    from shorts_generator import highlights as sg_highlights
+
+    original_chunker = sg_highlights.chunk_transcript
+
+    def chunk_transcript_rebased(transcript):
+        chunks = original_chunker(transcript)
+        for chunk in chunks:
+            off = chunk.get("_offset", 0)
+            chunk["segments"] = [
+                {**s, "start": s["start"] - off, "end": s["end"] - off}
+                for s in chunk["segments"]
+            ]
+        return chunks
+
+    sg_highlights.chunk_transcript = chunk_transcript_rebased
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        original_client = genai.Client
+
+        def client_v1beta(**kwargs):
+            kwargs.setdefault("http_options", types.HttpOptions(api_version="v1beta"))
+            return original_client(**kwargs)
+
+        genai.Client = client_v1beta
+    except ImportError:
+        pass  # Gemini not installed; OpenAI / MuAPI paths don't need this.
+    _patched = True
+
+
 def make_shorts(source, out_dir, num_clips, mode=SHORTS_MODE, aspect_ratio=ASPECT_RATIO):
     """Rank highlights in `source` (local path or URL) and render vertical shorts."""
     if not (SHORTS_REPO / "shorts_generator").is_dir():
@@ -148,6 +197,8 @@ def make_shorts(source, out_dir, num_clips, mode=SHORTS_MODE, aspect_ratio=ASPEC
     import shorts_generator
     from shorts_generator.local import clipper as sg_clipper
     from shorts_generator.local import transcriber as sg_transcriber
+
+    _patch_shorts_generator()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     # The generator writes to a module-level LOCAL_OUTPUT_DIR; point it at this stream.
