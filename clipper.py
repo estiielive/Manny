@@ -150,11 +150,47 @@ def _patch_shorts_generator():
        always long, so rebase each chunk's segments to start at 0.
     2. The google-genai SDK defaults to the v1 API, where current Gemini models
        (e.g. preview ones) aren't served; use v1beta.
+    3. Each short is cut with `-ss` after `-i`, so ffmpeg decodes the VOD from the
+       start every time (minutes per short on a multi-hour VOD). Seek before -i.
+    4. Shorts come out as OpenCV's MPEG-4 Part 2 (~16 Mbps), which is huge and not
+       what TikTok/Shorts/Reels expect. Re-encode the final file to H.264.
     """
     global _patched
     if _patched:
         return
     from shorts_generator import highlights as sg_highlights
+    from shorts_generator.local import clipper as sg_clipper
+
+    def cut_subclip_fast(source_path, start, end, out_path):
+        subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{start:.3f}", "-i", source_path, "-t", f"{end - start:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "128k",
+            out_path,
+        ], check=True)
+        return out_path
+
+    sg_clipper._cut_subclip = cut_subclip_fast
+
+    original_reframe = sg_clipper._reframe_vertical
+
+    def reframe_h264(in_path, out_path, aspect_ratio):
+        raw = out_path + ".mp4v.mp4"
+        original_reframe(in_path, raw, aspect_ratio)
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error", "-i", raw,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+                "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
+                out_path,
+            ], check=True)
+        finally:
+            if os.path.exists(raw):
+                os.remove(raw)
+        return out_path
+
+    sg_clipper._reframe_vertical = reframe_h264
 
     original_chunker = sg_highlights.chunk_transcript
 
