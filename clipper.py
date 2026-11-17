@@ -206,6 +206,23 @@ def _patch_shorts_generator():
 
     sg_highlights.chunk_transcript = chunk_transcript_rebased
 
+    # Cache the LLM's highlight picks next to the shorts so a failed render can be
+    # retried without spending API calls (free tiers allow only ~20 requests/day).
+    from shorts_generator import pipeline as sg_pipeline
+    original_get_highlights = sg_pipeline.get_highlights
+
+    def get_highlights_cached(transcript, num_clips=3, llm_fn=None):
+        cache = Path(sg_clipper.LOCAL_OUTPUT_DIR) / "highlights.json"
+        if cache.exists():
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            log(f"Reusing {len(cached['highlights'])} cached highlights from {cache}")
+            return cached
+        result = original_get_highlights(transcript, num_clips=num_clips, llm_fn=llm_fn)
+        cache.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        return result
+
+    sg_pipeline.get_highlights = get_highlights_cached
+
     try:
         from google import genai
         from google.genai import types
