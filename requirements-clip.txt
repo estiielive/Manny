@@ -1,0 +1,6 @@
+# Extra dependencies for clipping (clipper.py / track_estiie.py --clip).
+-r requirements.txt
+# AI-Youtube-Shorts-Generator (vendored as a git submodule), local mode:
+-r vendor/AI-Youtube-Shorts-Generator/requirements-local.txt
+# OpenCV 5 removed CascadeClassifier, which the shorts generator uses for face tracking.
+opencv-python>=4.8,<5

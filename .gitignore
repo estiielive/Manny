@@ -1,3 +1,5 @@
 *_log.csv
 __pycache__/
 .env
+clips/
+bin/

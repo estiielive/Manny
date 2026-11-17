@@ -10,10 +10,13 @@ Setup:
   2. pip install requests
   3. export TWITCH_CLIENT_ID=...   export TWITCH_CLIENT_SECRET=...
   4. python track_estiie.py            (or: python track_estiie.py otherlogin)
+
+Add --clip to auto-clip each stream when it ends (see clipper.py).
 """
 import csv
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -21,7 +24,9 @@ import requests
 
 CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID")
 CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET")
-LOGIN = (sys.argv[1] if len(sys.argv) > 1 else "estiie").lower()
+_args = [a for a in sys.argv[1:] if not a.startswith("--")]
+AUTO_CLIP = "--clip" in sys.argv[1:]
+LOGIN = (_args[0] if _args else "estiie").lower()
 POLL_SECONDS = 60
 CSV_PATH = f"{LOGIN}_log.csv"
 
@@ -112,6 +117,20 @@ def log_row(row):
         w.writerow(row)
 
 
+def start_clipping(uid, login, stream_id, started_at):
+    """Run the clipping pipeline in the background so polling keeps going."""
+    import clipper
+
+    def run():
+        # Give Twitch a couple of minutes to finalise the VOD.
+        time.sleep(120)
+        clipper.process_stream(api_get, uid, login, stream_id=stream_id,
+                               started_at=started_at,
+                               ended_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    threading.Thread(target=run, name="clipper", daemon=False).start()
+
+
 def main():
     if not CLIENT_ID or not CLIENT_SECRET:
         sys.exit("Set TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET first.")
@@ -126,6 +145,10 @@ def main():
     last_title = None
     last_game = None
     peak = 0
+    stream_id = None
+    stream_started = None
+    if AUTO_CLIP:
+        print("  Auto-clipping enabled: clips + shorts will be made when the stream ends.")
 
     try:
         while True:
@@ -143,6 +166,11 @@ def main():
                         print(f"[{now()}] 🔴 WENT LIVE: {title} ({game})")
                     else:
                         print(f"[{now()}] ⚫ WENT OFFLINE (peak this stream: {peak})")
+                        if AUTO_CLIP:
+                            start_clipping(uid, user["login"], stream_id, stream_started)
+                if stream:
+                    stream_id = stream["id"]
+                    stream_started = stream["started_at"]
                 if last_title is not None and title != last_title:
                     print(f"[{now()}] Title changed: {title}")
                 if last_game is not None and game != last_game:
