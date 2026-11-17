@@ -223,6 +223,31 @@ def _patch_shorts_generator():
 
     sg_pipeline.get_highlights = get_highlights_cached
 
+    # Retry transient LLM errors (overloaded / brief rate limits) instead of failing
+    # the whole run on the first one.
+    import time as _time
+    from shorts_generator.local import llm as sg_llm
+    original_llm = sg_llm.call_local_llm
+
+    def call_llm_with_retry(prompt):
+        delays = [10, 30, 60, 120]
+        for attempt in range(len(delays) + 1):
+            try:
+                return original_llm(prompt)
+            except Exception as e:
+                msg = str(e)
+                transient = any(k in msg for k in ("503", "UNAVAILABLE", "overloaded",
+                                                   "high demand", "500", "502", "504"))
+                # A per-minute 429 is worth waiting out; a daily quota is not.
+                if "429" in msg and "per day" not in msg.lower() and "no credits" not in msg:
+                    transient = True
+                if not transient or attempt == len(delays):
+                    raise
+                log(f"LLM busy ({msg[:60]}...); retrying in {delays[attempt]}s")
+                _time.sleep(delays[attempt])
+
+    sg_llm.call_local_llm = call_llm_with_retry
+
     try:
         from google import genai
         from google.genai import types
