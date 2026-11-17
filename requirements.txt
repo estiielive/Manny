@@ -1,1 +1,7 @@
 requests>=2.28
+# clipper
+yt-dlp>=2025.1.1
+numpy>=1.26
+opencv-python-headless>=4.8,<5   # 5.x dropped the bundled face models
+openai>=1.40                     # Whisper API transcription + LLM moment picking (optional)
+faster-whisper>=1.1              # free local transcription when there's no OpenAI key

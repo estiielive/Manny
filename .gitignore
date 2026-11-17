@@ -1,3 +1,6 @@
 *_log.csv
 __pycache__/
 .env
+.clipper_cache/
+clips/
+.pytest_cache/
