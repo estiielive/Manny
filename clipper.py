@@ -27,6 +27,8 @@ Settings (environment variables, all optional):
   CLIP_VOD_MAX_MINUTES   only use the first N minutes of the VOD for shorts
                                                                (default: 0 = whole VOD)
   CLIP_ASPECT_RATIO      shorts aspect ratio                   (default: 9:16)
+  CLIP_RANKING           ai (LLM picks moments) or loudness (loudest audio peaks,
+                         no API key needed)                    (default: ai)
   TWITCHDOWNLOADER_CLI   path to TwitchDownloaderCLI           (default: bin/TwitchDownloaderCLI)
 Plus the shorts generator's own keys: OPENAI_API_KEY or GEMINI_API_KEY (+ LLM_PROVIDER)
 for local mode, MUAPI_API_KEY for api mode.
@@ -51,6 +53,7 @@ OUT_ROOT = Path(os.environ.get("CLIP_OUTPUT_DIR", ROOT / "clips"))
 TOP_N = int(os.environ.get("CLIP_TOP_N", "5"))
 NUM_SHORTS = int(os.environ.get("CLIP_NUM_SHORTS", "3"))
 SHORTS_MODE = os.environ.get("CLIP_SHORTS_MODE", "local").lower()
+RANKING = os.environ.get("CLIP_RANKING", "ai").lower()
 VOD_MAX_MINUTES = float(os.environ.get("CLIP_VOD_MAX_MINUTES", "0"))
 ASPECT_RATIO = os.environ.get("CLIP_ASPECT_RATIO", "9:16")
 
@@ -264,6 +267,107 @@ def _patch_shorts_generator():
     _patched = True
 
 
+def loudness_highlights(video_path, num_clips, before=20.0, after=10.0, min_gap=90.0,
+                        transcript_segments=None):
+    """Pick highlight windows around the loudest moments of the stream audio.
+
+    No LLM needed: hype moments on stream (kills, clutches, screaming at chat) are
+    loud. Audio RMS is measured per second, smoothed over 3 s, and the top peaks at
+    least `min_gap` seconds apart become clips running from `before` seconds ahead
+    of the peak (the build-up) to `after` seconds past it (the reaction).
+    """
+    import numpy as np
+
+    rate = 8000
+    proc = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", str(video_path), "-vn", "-ac", "1",
+         "-ar", str(rate), "-f", "s16le", "-"],
+        check=True, stdout=subprocess.PIPE,
+    )
+    audio = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32)
+    seconds = len(audio) // rate
+    if seconds == 0:
+        raise RuntimeError("No audio found in the VOD.")
+    per_sec = audio[: seconds * rate].reshape(seconds, rate)
+    rms_db = 20 * np.log10(np.sqrt((per_sec ** 2).mean(axis=1)) + 1e-6)
+    # Twitch VODs have digitally silent stretches (muted copyrighted music, BRB
+    # screens). Treat them as average level so the audio coming back after a mute
+    # doesn't look like a huge spike, and never clip across them.
+    silent = rms_db < -60
+    if silent.all():
+        raise RuntimeError("The VOD's audio is silent.")
+    rms_db = np.where(silent, np.median(rms_db[~silent]), rms_db)
+    smooth = np.convolve(rms_db, np.ones(3) / 3, mode="same")
+    # Score each second against its surroundings (5-minute rolling median), so a
+    # loud moment in a quiet stretch counts as much as one in a loud stretch.
+    win = 300
+    pad = np.pad(smooth, win // 2, mode="edge")
+    baseline = np.array([np.median(pad[i:i + win]) for i in range(seconds)])
+    score = smooth - baseline
+
+    skip_intro = 120 if seconds > 600 else 0  # stream-starting screens / intro music
+    picks = []
+    for t in np.argsort(score)[::-1]:
+        t = int(t)
+        lo, hi = max(0, int(t - before)), min(seconds, int(t + after) + 1)
+        if t < skip_intro or silent[lo:hi].any():
+            continue
+        if all(abs(t - p) >= min_gap for p in picks):
+            picks.append(int(t))
+        if len(picks) == num_clips:
+            break
+
+    def text_near(start, end):
+        if not transcript_segments:
+            return ""
+        return " ".join(s["text"].strip() for s in transcript_segments
+                        if s["end"] >= start and s["start"] <= end).strip()
+
+    highlights = []
+    for t in sorted(picks):
+        start = max(0.0, t - before)
+        end = min(float(seconds), t + after)
+        words = text_near(t - 5, t + 5)
+        stamp = f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
+        highlights.append({
+            "title": (words[:60] + "...") if len(words) > 60 else (words or f"Hype moment at {stamp}"),
+            "start_time": start,
+            "end_time": end,
+            "peak_time": float(t),
+            "score": round(float(score[t]), 1),  # dB above the local baseline
+            "hook_sentence": words[:120],
+            "virality_reason": f"Audio peak {score[t]:.1f} dB above the surrounding 5 minutes at {stamp}",
+        })
+    return highlights
+
+
+def make_shorts_by_loudness(video_path, out_dir, num_clips, aspect_ratio=ASPECT_RATIO):
+    """Render shorts from the loudest moments of a local VOD file (no API key needed)."""
+    if str(SHORTS_REPO) not in sys.path:
+        sys.path.insert(0, str(SHORTS_REPO))
+    from shorts_generator.local import clipper as sg_clipper
+    _patch_shorts_generator()
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    segments = None
+    srt = out_dir / (Path(video_path).stem + ".srt")
+    if srt.exists():  # reuse a transcript if one was made earlier, for titles
+        from shorts_generator.local import transcriber as sg_transcriber
+        segments = sg_transcriber._load_srt_cache(srt).get("segments")
+
+    log(f"Finding the {num_clips} loudest moments in {video_path}")
+    highlights = loudness_highlights(video_path, num_clips, transcript_segments=segments)
+    shorts = sg_clipper.crop_highlights_local(str(video_path), highlights,
+                                              aspect_ratio=aspect_ratio, out_dir=str(out_dir))
+    result = {"mode": "loudness", "source_video_url": str(video_path), "shorts": shorts}
+    with open(out_dir / "shorts.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, default=str)
+    for s in shorts:
+        log(f"  short +{s['score']} dB '{s['title']}' -> "
+            f"{s.get('clip_url') or 'FAILED: ' + str(s.get('error'))}")
+    return result
+
+
 def make_shorts(source, out_dir, num_clips, mode=SHORTS_MODE, aspect_ratio=ASPECT_RATIO):
     """Rank highlights in `source` (local path or URL) and render vertical shorts."""
     if not (SHORTS_REPO / "shorts_generator").is_dir():
@@ -343,11 +447,15 @@ def process_stream(api_get, user_id, login, stream_id=None, started_at=None, end
         # 2. AI shorts from the VOD, via TwitchDownloader + AI-Youtube-Shorts-Generator.
         if NUM_SHORTS > 0 and vod:
             try:
-                if SHORTS_MODE == "local":
+                if RANKING == "loudness":
                     source = download_vod(vod, out, VOD_MAX_MINUTES)
+                    make_shorts_by_loudness(source, out / "shorts", NUM_SHORTS)
                 else:
-                    source = vod["url"]  # MuAPI fetches it itself
-                make_shorts(source, out / "shorts", NUM_SHORTS)
+                    if SHORTS_MODE == "local":
+                        source = download_vod(vod, out, VOD_MAX_MINUTES)
+                    else:
+                        source = vod["url"]  # MuAPI fetches it itself
+                    make_shorts(source, out / "shorts", NUM_SHORTS)
             except Exception as e:
                 log(f"Shorts step failed: {e}")
         elif NUM_SHORTS > 0:

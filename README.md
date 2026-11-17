@@ -81,6 +81,7 @@ python clipper.py otherlogin --vod 2312345678
 | `CLIP_TOP_N` | `5` | Viewer clips to download (`0` = skip) |
 | `CLIP_NUM_SHORTS` | `3` | AI shorts to render (`0` = skip) |
 | `CLIP_VOD_MAX_MINUTES` | `0` | Only use the first N minutes of the VOD (`0` = whole VOD). Whisper on a multi-hour VOD is slow on CPU; set `LOCAL_WHISPER_DEVICE=cuda` if you have a GPU |
+| `CLIP_RANKING` | `ai` | `ai` (an LLM ranks the transcript) or `loudness` (the loudest audio peaks, skipping muted sections; no API key or transcription needed) |
 | `CLIP_SHORTS_MODE` | `local` | `local` (runs on your machine) or `api` (hosted MuAPI, needs `MUAPI_API_KEY`) |
 | `CLIP_ASPECT_RATIO` | `9:16` | Shorts aspect ratio, e.g. `1:1` |
 | `CLIP_OUTPUT_DIR` | `clips` | Where results go |
