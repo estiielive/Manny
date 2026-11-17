@@ -62,6 +62,8 @@ clips/<login>/<vod_id>/
    ```sh
    export OPENAI_API_KEY=...          # or: export LLM_PROVIDER=gemini GEMINI_API_KEY=...
    ```
+   With Gemini, also set `GEMINI_MODEL` (e.g. `gemini-3-flash-preview`): the generator's default,
+   `gemini-2.5-flash`, is no longer available to new API keys.
 5. The channel needs **past broadcasts (VODs) enabled** for shorts.
 
 ### Running it
